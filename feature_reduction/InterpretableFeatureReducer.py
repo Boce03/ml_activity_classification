@@ -1,17 +1,8 @@
-# Gornju redukciju atributa sada pakujemo u sklearn transformator, da bi mogla da se koristi unutar Pipeline-a isto kao PCA ili LDA.
-# Zasto je to neophodno, a ne samo kozmeticko: nasa redukcija je NADGLEDANA (mutual information gleda y, tj. ciljnu klasu), pa skup od 15 atributa
-# koji smo gore dobili zavisi od celog trening skupa. Ako bismo taj fiksni skup atributa prosledili u GridSearchCV, svaki validacioni podskup bi
-# bio ocenjen atributima koji su birani i na osnovu njegovih redova - to je curenje informacija i precenjena ocena tacnosti modela.
+# Interpretabilnu redukciju atributa pakujemo u sklearn trasformer koji se moze koristiti u pipeline-u poput PCA i LDA transformacija
+# To je potrebno, jer je ova redukcija nadgledana, pa se mora izvrsavati samo nad foldovima koji upadaju u trening skup prilikom unakrsne
+# validacije, kako ne bi doslo do curenja informacija u testu ili validacionom skupu.
 # Kada je redukcija transformator u Pipeline-u, GridSearchCV je poziva iznova na svakom trening delu podele (fit), a validacioni deo samo
 # transformise (transform), pa izbor atributa nikada ne vidi redove na kojima se model ocenjuje.
-# Konvencija sklearn-a koju pratimo:
-#   - fit(X, y) uci sta treba da se zapamti i vraca self, transform(X) samo primenjuje naucen izbor
-#   - sve sto je nauceno stoji u atributima sa donjom crtom na kraju (selected_features_, mi_scores_, ...)
-#   - __init__ ne radi nikakav posao; posto po dogovoru ovaj metod nema hiperparametre, on i ne postoji, pa je get_params() prazan recnik,
-#     a clone() (koji GridSearchCV interno koristi za svaku kombinaciju parametara) radi bez ijedne dodatne linije.
-#     Ako bismo kasnije zeleli da trazimo najbolje CORR_THRESHOLD i TOP_K, oni bi postali argumenti __init__-a i mogli bi da udju u mrezu pretrage.
-# Normalizacija po subjektu namerno ostaje van Pipeline-a: njoj treba subject_id (grupe), a ne samo X, i kao sto je gore objasnjeno ona ne
-# donosi curenje informacija, pa moze da se uradi jednom, pre podele na foldove.
 
 import pandas as pd
 import numpy as np
@@ -28,10 +19,6 @@ TOP_K = 15
 
 
 class InterpretableFeatureReducer(BaseEstimator, TransformerMixin):
-    """Redukcija atributa u 4 koraka (varijansa -> MI -> klasteri po korelaciji -> pohlepni izbor TOP_K),
-    upakovana kao sklearn transformator. Za razliku od PCA i LDA, izlaz je pravi podskup polaznih kolona,
-    pa rezultat ostaje interpretabilan kao "bas ovo merenje sa ovog senzora razdvaja aktivnosti"."""
-
     def _as_frame(self, X):
         # radimo sa DataFrame-om zbog imena kolona, ali dozvoljavamo i numpy niz (npr. ako je pre nas u Pipeline-u neki drugi transformator)
         if isinstance(X, pd.DataFrame):
@@ -43,18 +30,15 @@ class InterpretableFeatureReducer(BaseEstimator, TransformerMixin):
         frame = self._as_frame(X)
         y = np.asarray(y).ravel()
 
-        # --- Korak 1: izbacujemo atribute cija je varijansa bliska nuli ---
         variances = frame.var()
         keep_mask = variances.abs() >= VARIANCE_THRESHOLD
         frame_step1 = frame.loc[:, keep_mask]
 
-        # --- Korak 2: uzajamna informacija svakog preostalog atributa sa ciljnom klasom ---
         mi_scores = pd.Series(
             mutual_info_classif(frame_step1, y, random_state=RANDOM_STATE, n_jobs=-1),
             index=frame_step1.columns,
         )
 
-        # --- Korak 3: hijerarhijsko klasterovanje po Spearman-ovoj korelaciji, predstavnik klastera je atribut sa najvecim MI ---
         abs_corr = frame_step1.corr(method="spearman").fillna(0.0).abs()
         distance_matrix = 1.0 - abs_corr.to_numpy()
         distance_matrix = (distance_matrix + distance_matrix.T) / 2.0
@@ -67,7 +51,6 @@ class InterpretableFeatureReducer(BaseEstimator, TransformerMixin):
         )
         representatives = list(mi_scores.groupby(clusters).idxmax())
 
-        # --- Korak 4: pohlepni izbor TOP_K predstavnika bez medjusobno redundantnih parova ---
         selected_features = []
         for candidate in mi_scores.loc[representatives].sort_values(ascending=False).index:
             if len(selected_features) == TOP_K:
