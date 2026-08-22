@@ -6,4 +6,3 @@ venv/
 .ipynb_checkpoints/
 .DS_Store
 cache/
-models/
